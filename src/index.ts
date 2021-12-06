@@ -1,7 +1,12 @@
 import { ConnectorUpdate } from '@web3-react/types'
 import { AbstractConnector } from '@web3-react/abstract-connector'
+import { IWalletConnectProviderOptions } from '@walletconnect/types';
 
 const CHAIN_ID = 1
+
+export interface WalletConnectConnectorArguments extends IWalletConnectProviderOptions {
+  supportedChainIds?: number[];
+}
 
 interface WalletLinkConnectorArguments {
   url: string
@@ -96,4 +101,19 @@ export class WalletLinkConnector extends AbstractConnector {
     }
     this.emitUpdate({ account: accounts[0] })
   }
+}
+
+export declare class WalletConnectConnector extends AbstractConnector {
+  private readonly config;
+  walletConnectProvider?: any;
+  constructor(config: WalletConnectConnectorArguments);
+  private handleChainChanged;
+  private handleAccountsChanged;
+  private handleDisconnect;
+  activate(): Promise<ConnectorUpdate>;
+  getProvider(): Promise<any>;
+  getChainId(): Promise<number | string>;
+  getAccount(): Promise<null | string>;
+  deactivate(): void;
+  close(): Promise<void>;
 }
