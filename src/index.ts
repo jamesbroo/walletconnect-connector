@@ -1,98 +1,49 @@
 import { ConnectorUpdate } from '@web3-react/types'
 import { AbstractConnector } from '@web3-react/abstract-connector'
-import { IWalletConnectProviderOptions } from '@walletconnect/types';
+import { IWalletConnectProviderOptions } from '@walletconnect/types'
 
-const CHAIN_ID = 1
+export const URI_AVAILABLE = 'URI_AVAILABLE'
 
 export interface WalletConnectConnectorArguments extends IWalletConnectProviderOptions {
-  supportedChainIds?: number[];
-}
-
-interface WalletLinkConnectorArguments {
-  url: string
-  appName: string
-  appLogoUrl?: string
-  darkMode?: boolean
   supportedChainIds?: number[]
 }
 
-export class WalletLinkConnector extends AbstractConnector {
-  private readonly url: string
-  private readonly appName: string
-  private readonly appLogoUrl?: string
-  private readonly darkMode: boolean
+export class UserRejectedRequestError extends Error {
+  public constructor() {
+    super()
+    this.name = this.constructor.name
+    this.message = 'The user rejected the request.'
+  }
+}
 
-  public walletLink: any
-  private provider: any
+function getSupportedChains({ supportedChainIds, rpc }: WalletConnectConnectorArguments): number[] | undefined {
+  if (supportedChainIds) {
+    return supportedChainIds
+  }
 
-  constructor({ url, appName, appLogoUrl, darkMode, supportedChainIds }: WalletLinkConnectorArguments) {
-    super({ supportedChainIds: supportedChainIds })
+  return rpc ? Object.keys(rpc).map(k => Number(k)) : undefined
+}
 
-    this.url = url
-    this.appName = appName
-    this.appLogoUrl = appLogoUrl
-    this.darkMode = darkMode || false
+export class WalletConnectConnector extends AbstractConnector {
+  private readonly config: WalletConnectConnectorArguments
+
+  public walletConnectProvider?: any
+
+  constructor(config: WalletConnectConnectorArguments) {
+    super({ supportedChainIds: getSupportedChains(config) })
+
+    this.config = config
 
     this.handleChainChanged = this.handleChainChanged.bind(this)
     this.handleAccountsChanged = this.handleAccountsChanged.bind(this)
-  }
-
-  public async activate(): Promise<ConnectorUpdate> {
-    // @ts-ignore
-    if (window.ethereum && window.ethereum.isCoinbaseWallet === true) {
-      // user is in the dapp browser on Coinbase Wallet
-      this.provider = window.ethereum
-    } else if (!this.walletLink) {
-      const WalletLink = await import('walletlink').then(m => m?.default ?? m)
-      this.walletLink = new WalletLink({
-        appName: this.appName,
-        darkMode: this.darkMode,
-        ...(this.appLogoUrl ? { appLogoUrl: this.appLogoUrl } : {})
-      })
-      this.provider = this.walletLink.makeWeb3Provider(this.url, CHAIN_ID)
-    }
-
-    const accounts = await this.provider.request({
-      method: 'eth_requestAccounts'
-    })
-    const account = accounts[0]
-
-    this.provider.on('chainChanged', this.handleChainChanged)
-    this.provider.on('accountsChanged', this.handleAccountsChanged)
-
-    return { provider: this.provider, account: account }
-  }
-
-  public async getProvider(): Promise<any> {
-    return this.provider
-  }
-
-  public async getChainId(): Promise<number> {
-    return this.provider.chainId
-  }
-
-  public async getAccount(): Promise<null | string> {
-    const accounts = await this.provider.request({
-      method: 'eth_requestAccounts'
-    })
-    return accounts[0]
-  }
-
-  public deactivate() {
-    this.provider.removeListener('chainChanged', this.handleChainChanged)
-    this.provider.removeListener('accountsChanged', this.handleAccountsChanged)
-  }
-
-  public async close() {
-    this.provider.close()
-    this.emitDeactivate()
+    this.handleDisconnect = this.handleDisconnect.bind(this)
   }
 
   private handleChainChanged(chainId: number | string): void {
     if (__DEV__) {
       console.log("Handling 'chainChanged' event with payload", chainId)
     }
-    this.emitUpdate({ chainId: chainId })
+    this.emitUpdate({ chainId })
   }
 
   private handleAccountsChanged(accounts: string[]): void {
@@ -101,19 +52,61 @@ export class WalletLinkConnector extends AbstractConnector {
     }
     this.emitUpdate({ account: accounts[0] })
   }
-}
 
-export declare class WalletConnectConnector extends AbstractConnector {
-  private readonly config;
-  walletConnectProvider?: any;
-  constructor(config: WalletConnectConnectorArguments);
-  private handleChainChanged;
-  private handleAccountsChanged;
-  private handleDisconnect;
-  activate(): Promise<ConnectorUpdate>;
-  getProvider(): Promise<any>;
-  getChainId(): Promise<number | string>;
-  getAccount(): Promise<null | string>;
-  deactivate(): void;
-  close(): Promise<void>;
+  private handleDisconnect(): void {
+    if (__DEV__) {
+      console.log("Handling 'disconnect' event")
+    }
+    this.emitDeactivate()
+  }
+
+  public async activate(): Promise<ConnectorUpdate> {
+    if (!this.walletConnectProvider) {
+      const WalletConnectProvider = await import('@walletconnect/ethereum-provider').then(m => m?.default ?? m)
+      this.walletConnectProvider = new WalletConnectProvider(this.config)
+    }
+
+    this.walletConnectProvider.on('chainChanged', this.handleChainChanged)
+    this.walletConnectProvider.on('accountsChanged', this.handleAccountsChanged)
+    this.walletConnectProvider.on('disconnect', this.handleDisconnect)
+
+    const account = await this.walletConnectProvider
+      .enable()
+      .then((accounts: string[]): string => accounts[0])
+      .catch((error: Error): void => {
+        // TODO ideally this would be a better check
+        if (error.message === 'User closed modal') {
+          throw new UserRejectedRequestError()
+        }
+
+        throw error
+      })
+
+    return { provider: this.walletConnectProvider, account }
+  }
+
+  public async getProvider(): Promise<any> {
+    return this.walletConnectProvider
+  }
+
+  public async getChainId(): Promise<number | string> {
+    return Promise.resolve(this.walletConnectProvider.chainId)
+  }
+
+  public async getAccount(): Promise<null | string> {
+    return Promise.resolve(this.walletConnectProvider.accounts).then((accounts: string[]): string => accounts[0])
+  }
+
+  public deactivate() {
+    if (this.walletConnectProvider) {
+      this.walletConnectProvider.removeListener('disconnect', this.handleDisconnect)
+      this.walletConnectProvider.removeListener('chainChanged', this.handleChainChanged)
+      this.walletConnectProvider.removeListener('accountsChanged', this.handleAccountsChanged)
+      this.walletConnectProvider.disconnect()
+    }
+  }
+
+  public async close() {
+    this.emitDeactivate()
+  }
 }
